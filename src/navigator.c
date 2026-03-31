@@ -180,7 +180,7 @@ void imv_navigator_select_abs(struct imv_navigator *nav, ssize_t index)
 
   const size_t prev_path = nav->cur_path;
   nav->cur_path = (size_t)index;
-  nav->changed = prev_path != nav->cur_path;
+  nav->changed = prev_path != nav->cur_path || nav->changed;
   nav->last_move_direction = (index >= (ssize_t)prev_path) ? 1 : -1;
 }
 
