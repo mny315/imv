@@ -39,6 +39,9 @@ static void load_image(void *raw_private, struct imv_image **image, int *frameti
   int stride;
   const uint8_t *data = heif_image_get_plane_readonly(
       private->img, heif_channel_interleaved, &stride);
+  if (!data || stride <= 0) {
+    return;
+  }
 
   struct imv_bitmap bmp = imv_bitmap_alloc(
       heif_image_get_width(private->img, heif_channel_interleaved),
