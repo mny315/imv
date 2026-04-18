@@ -30,7 +30,11 @@ static void free_private(void *raw_private)
 static void* bitmap_create(int width, int height, unsigned int state)
 {
   (void)state; // We always clear and use 4 bpp
-  return calloc(1, width * height * BPP);
+  if (width <= 0 || height <= 0 ||
+      (size_t)width > SIZE_MAX / (size_t)height / BPP) {
+    return NULL;
+  }
+  return calloc(1, (size_t)width * (size_t)height * BPP);
 }
 
 static void bitmap_destroy(void *bitmap)

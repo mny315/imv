@@ -175,7 +175,7 @@ static int decompress_from_cmyk(struct private *private, void *bitmap)
   unsigned char inverted = 0;
   extract_icc_profile(private, &icc_data, &icc_length, &inverted);
 
-  unsigned char *cmyk_buffer = malloc(private->height * private->width * 4);
+  unsigned char *cmyk_buffer = malloc((size_t)private->height * (size_t)private->width * 4);
   int rcode =
       tjDecompress2(private->jpeg, private->data, private->len, cmyk_buffer,
           private->width, 0, private->height, TJPF_CMYK, TJFLAG_ACCURATEDCT);

@@ -22,7 +22,11 @@ struct private {
 static nsgif_bitmap_t* bitmap_create(int width, int height)
 {
   const size_t bytes_per_pixel = 4;
-  return calloc(width * height, bytes_per_pixel);
+  if (width <= 0 || height <= 0 ||
+      (size_t)width > SIZE_MAX / (size_t)height / bytes_per_pixel) {
+    return NULL;
+  }
+  return calloc((size_t)width * (size_t)height, bytes_per_pixel);
 }
 
 static void bitmap_destroy(void *bitmap)
