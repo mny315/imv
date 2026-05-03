@@ -7,7 +7,7 @@ time_t imv_time(void) { return time(NULL); }
 time_t imv_file_last_modified(const char *path)
 {
   struct stat file_info;
-  if (!stat(path, &file_info)) {
+  if (stat(path, &file_info) != 0) {
     return 0;
   }
 
