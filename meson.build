@@ -271,9 +271,10 @@ xxd = find_program('xxd', required: get_option('test'))
 
 if dep_cmocka.found() and xxd.found()
   embed = generator(
-    xxd,
+    find_program('sh'),
     output: '@PLAINNAME@.c',
-    arguments: ['-n', '@PLAINNAME@', '-i', '@INPUT@', '@OUTPUT@']
+    arguments: ['-c', 'f="@INPUT@"; cd "${f%/*}" && xxd -i "${f##*/}"'],
+    capture: true
   )
 
   test_images = static_library(
