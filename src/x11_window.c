@@ -1,4 +1,5 @@
 #include "window.h"
+#include "event_queue.h"
 
 #include <assert.h>
 #include <fcntl.h>
@@ -40,17 +41,8 @@ struct imv_window {
   } pointer;
 
   struct imv_keyboard *keyboard;
-  int pipe_fds[2];
+  struct imv_event_queue *events;
 };
-
-static void set_nonblocking(int fd)
-{
-  int flags = fcntl(fd, F_GETFL);
-  assert(flags != -1);
-  flags |= O_NONBLOCK;
-  int rc = fcntl(fd, F_SETFL, flags);
-  assert(rc != -1);
-}
 
 static void setup_keymap(struct imv_window *window)
 {
@@ -106,18 +98,20 @@ static void load_gl_functions(void) {
 struct imv_window *imv_window_create(int w, int h, const char *title,
                                      const char *app_id)
 {
-  /* Ensure event writes will always be atomic */
-  assert(sizeof(struct imv_event) <= PIPE_BUF);
-
   struct imv_window *window = calloc(1, sizeof *window);
+  window->events = imv_event_queue_create();
+  if (!window->events) {
+    free(window);
+    return NULL;
+  }
   window->pointer.last.x = -1;
   window->pointer.last.y = -1;
-  pipe(window->pipe_fds);
-  set_nonblocking(window->pipe_fds[0]);
-  set_nonblocking(window->pipe_fds[1]);
+
 
   window->x_display = XOpenDisplay(NULL);
   if (window->x_display == NULL) {
+    imv_event_queue_free(window->events);
+    free(window);
     return NULL;
   }
   Window root = DefaultRootWindow(window->x_display);
@@ -178,8 +172,7 @@ struct imv_window *imv_window_create(int w, int h, const char *title,
 void imv_window_free(struct imv_window *window)
 {
   imv_keyboard_free(window->keyboard);
-  close(window->pipe_fds[0]);
-  close(window->pipe_fds[1]);
+  imv_event_queue_free(window->events);
   glXMakeCurrent(window->x_display, None, NULL);
   glXDestroyContext(window->x_display, window->x_glc);
   XDestroyWindow(window->x_display, window->x_window);
@@ -293,7 +286,7 @@ void imv_window_wait_for_event(struct imv_window *window, double timeout)
 {
   struct pollfd fds[] = {
     {.fd = ConnectionNumber(window->x_display), .events = POLLIN},
-    {.fd = window->pipe_fds[0], .events = POLLIN}
+    {.fd = imv_event_queue_fd(window->events), .events = POLLIN}
   };
   nfds_t nfds = sizeof fds / sizeof *fds;
 
@@ -302,8 +295,7 @@ void imv_window_wait_for_event(struct imv_window *window, double timeout)
 
 void imv_window_push_event(struct imv_window *window, struct imv_event *e)
 {
-  /* Push it down the pipe */
-  write(window->pipe_fds[1], e, sizeof *e);
+  imv_event_queue_push(window->events, e);
 }
 
 static void handle_keyboard(struct imv_window *window, imv_event_handler handler, void *data, const XEvent *xev)
@@ -385,7 +377,9 @@ void imv_window_pump_events(struct imv_window *window, imv_event_handler handler
           .data = {
             .mouse_button = {
               .button = 1,
-              .pressed = xev.type == ButtonPress
+              .pressed = xev.type == ButtonPress,
+              .x = xev.xbutton.x,
+              .y = xev.xbutton.y,
             }
           }
         };
@@ -447,11 +441,9 @@ void imv_window_pump_events(struct imv_window *window, imv_event_handler handler
   /* Handle any events in the pipe */
   while (1) {
     struct imv_event e;
-    ssize_t len = read(window->pipe_fds[0], &e, sizeof e);
-    if (len <= 0) {
+    if (!imv_event_queue_pop(window->events, &e)) {
       break;
     }
-    assert(len == sizeof e);
     if (handler) {
       handler(data, &e);
     }

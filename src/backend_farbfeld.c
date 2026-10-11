@@ -4,6 +4,7 @@
 #include "source_private.h"
 
 #include <stdint.h>
+#include <limits.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -46,7 +47,8 @@ static const struct imv_source_vtable vtable = {
 };
 
 static inline uint32_t read_be_uint32(const uint8_t *data) {
-  return (data[0] << 24) + (data[1] << 16) + (data[2] << 8)+ (data[3] << 0);
+  return ((uint32_t)data[0] << 24) | ((uint32_t)data[1] << 16) |
+      ((uint32_t)data[2] << 8) | data[3];
 }
 
 static enum backend_result open_memory(void *data, size_t len, struct imv_source **src)
@@ -64,10 +66,13 @@ static enum backend_result open_memory(void *data, size_t len, struct imv_source
   priv->width = read_be_uint32(bytes+8);
   priv->height = read_be_uint32(bytes+12);
 
-  if ((size_t)4 * priv->width > SIZE_MAX / priv->height) {
+  if (!priv->width || !priv->height || priv->width > INT32_MAX ||
+      priv->height > INT32_MAX ||
+      (size_t)priv->width > (SIZE_MAX - HEADER_SIZE) / 8 / priv->height) {
+    free(priv);
     return BACKEND_UNSUPPORTED;
   }
-  size_t bitmap_len = priv->width * priv->height * 4;
+  size_t bitmap_len = (size_t)priv->width * priv->height * 4;
   if (len != bitmap_len * 2 + HEADER_SIZE) {
     free(priv);
     return BACKEND_UNSUPPORTED;
@@ -91,6 +96,12 @@ static enum backend_result open_path(const char *path, struct imv_source **src)
   if (!f) {
     return BACKEND_BAD_PATH;
   }
+  unsigned char magic[8];
+  if (fread(magic, 1, sizeof magic, f) != sizeof magic ||
+      memcmp(magic, "farbfeld", sizeof magic)) {
+    fclose(f);
+    return BACKEND_UNSUPPORTED;
+  }
   fseek(f, 0, SEEK_END);
   long len = ftell(f);
   if (len <= 0 || fseek(f, 0, SEEK_SET) != 0) {
@@ -103,7 +114,11 @@ static enum backend_result open_path(const char *path, struct imv_source **src)
     fclose(f);
     return BACKEND_UNSUPPORTED;
   }
-  fread(data, len, 1, f);
+  if (fread(data, 1, len, f) != (size_t)len) {
+    free(data);
+    fclose(f);
+    return BACKEND_BAD_PATH;
+  }
   fclose(f);
 
   enum backend_result res = open_memory(data, len, src);

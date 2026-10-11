@@ -43,6 +43,9 @@ o = zoom -1
 
 # Other commands
 x = close
+<Delete> = trash
+<Ctrl+z> = undo_trash
+<Ctrl+c> = crop
 f = fullscreen
 d = overlay
 p = exec echo $imv_current_file

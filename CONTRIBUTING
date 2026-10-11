@@ -1,13 +1,16 @@
                          imv Contributing Guidelines
                          ===========================
 
-1) Please submit all patches to ~exec64/imv-devel@lists.sr.ht with
-   a subject line prefixed with [PATCH imv] or [PATCH imv v2] as
-   appropriate. This will help ensure that CI is run against your
-   patch automatically.
+1) Submit issues and pull requests for this fork at
+   https://github.com/mny315/imv.
 
 2) Please ensure that your changes fit with the existing coding style of imv.
    Strictly no tabs, and 2 spaces of indentation.
 
 3) All contributions are provided under the terms of the MIT license.
    You retain the copyright ownership of any contributions you make.
+
+4) Build with Meson and run `meson test -C build --print-errorlogs` before
+   submitting changes. Include a regression test when fixing a bug.
+
+The original project is https://sr.ht/~exec64/imv/.

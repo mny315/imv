@@ -1,5 +1,6 @@
 image: archlinux
 packages:
+  - glib2
   - asciidoc
   - clang
   - cmocka
@@ -27,7 +28,7 @@ packages:
   - wayland-protocols
   - tinyxxd
 sources:
-  - https://git.sr.ht/~exec64/imv
+  - https://github.com/mny315/imv
 tasks:
   - gcc: |
       CC=gcc meson setup imv build_gcc -D auto_features=enabled -Dwerror=true

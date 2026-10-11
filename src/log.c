@@ -8,7 +8,6 @@
 #include <stdlib.h>
 
 static struct list *g_log_clients = NULL;
-static char g_log_buffer[16384];
 
 struct log_client {
   imv_log_callback callback;
@@ -25,13 +24,14 @@ void imv_log(enum imv_log_level level, const char *fmt,  ...)
   }
 
   va_list args;
+  char buffer[16384];
   va_start(args, fmt);
-  vsnprintf(g_log_buffer, sizeof g_log_buffer, fmt, args);
+  vsnprintf(buffer, sizeof buffer, fmt, args);
   va_end(args);
 
   for (size_t i = 0; i < g_log_clients->len; ++i) {
     struct log_client *client = g_log_clients->items[i];
-    client->callback(level, g_log_buffer, client->data);
+    client->callback(level, buffer, client->data);
   }
 }
 
@@ -63,6 +63,10 @@ void imv_log_remove_log_callback(imv_log_callback callback)
     if (client->callback == callback) {
       free(client);
       list_remove(g_log_clients, i);
+      if (!g_log_clients->len) {
+        list_free(g_log_clients);
+        g_log_clients = NULL;
+      }
       return;
     }
   }

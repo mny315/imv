@@ -54,8 +54,15 @@ void imv_command_alias(struct imv_commands *cmds, const char *command, const cha
   list_append(cmds->command_list, cmd);
 }
 
-int imv_command_exec(struct imv_commands *cmds, const char *command, void *data)
+static int exec_command(struct imv_commands *cmds, const char *command, void *data,
+    unsigned depth)
 {
+  if (depth >= 64) {
+    return 1;
+  }
+  while (*command == ' ') {
+    ++command;
+  }
   struct list *args = list_from_string(command, ' ');
   int ret = 1;
 
@@ -65,7 +72,10 @@ int imv_command_exec(struct imv_commands *cmds, const char *command, void *data)
       if(!strcmp(cmd->command, args->items[0])) {
         if(cmd->handler) {
           /* argstr = all args as a single string */
-          const char *argstr = command + strlen(cmd->command) + 1;
+          const char *argstr = command + strlen(cmd->command);
+          while (*argstr == ' ') {
+            ++argstr;
+          }
           cmd->handler(args, argstr, data);
           ret = 0;
         } else if(cmd->alias) {
@@ -73,7 +83,7 @@ int imv_command_exec(struct imv_commands *cmds, const char *command, void *data)
           size_t cmd_len = strlen(cmd->alias) + 1 + strlen(new_args) + 1;
           char *new_cmd = malloc(cmd_len);
           snprintf(new_cmd, cmd_len, "%s %s", cmd->alias, new_args);
-          ret = imv_command_exec(cmds, new_cmd, data);
+          ret = exec_command(cmds, new_cmd, data, depth + 1);
           free(new_args);
           free(new_cmd);
         }
@@ -86,13 +96,24 @@ int imv_command_exec(struct imv_commands *cmds, const char *command, void *data)
   return ret;
 }
 
+int imv_command_exec(struct imv_commands *cmds, const char *command, void *data)
+{
+  return exec_command(cmds, command, data, 0);
+}
+
 int imv_command_exec_list(struct imv_commands *cmds, struct list *commands, void *data)
 {
+  /* A binding can replace itself while its command list is being executed. */
+  struct list *pending = list_create();
+  for (size_t i = 0; i < commands->len; ++i) {
+    list_append(pending, strdup(commands->items[i]));
+  }
   int ret = 0;
-  for(size_t i = 0; i < commands->len; ++i) {
-    const char *command = commands->items[i];
+  for(size_t i = 0; i < pending->len; ++i) {
+    const char *command = pending->items[i];
     ret += imv_command_exec(cmds, command, data);
   }
+  list_deep_free(pending);
   return ret;
 }
 

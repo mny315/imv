@@ -273,12 +273,15 @@ struct list *imv_bind_parse_keys(const char *keys)
 size_t imv_bind_print_keylist(const struct list *keys, char *buf, size_t len)
 {
   size_t printed = 0;
+  if (len) buf[0] = '\0';
 
   /* iterate through all the keys, wrapping them in '<' and '>' if needed */
   for(size_t i = 0; i < keys->len; ++i) {
     const char *key = keys->items[i];
     const char *format = strlen(key) > 1 ? "<%s>" : "%s";
-    printed += snprintf(buf, len - printed, format, key);
+    size_t available = printed < len ? len - printed : 0;
+    int required = snprintf(available ? buf + printed : NULL, available, format, key);
+    if (required > 0) printed += (size_t)required;
   }
   return printed;
 }

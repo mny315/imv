@@ -1,6 +1,24 @@
-imv
+# Local builds and binaries
+/imv
+/imv-wayland
+/imv-x11
+/imv-msg
+/test_*
+/build/
+/build-*/
+/build_*/
 *.o
-test_*
-build/
-subprojects/*
-!subprojects/*.wrap
+*.a
+
+# Downloaded Meson dependencies
+/subprojects/*
+!/subprojects/*.wrap
+
+# Personal test images and local development notes
+/Screenshots/
+/.local/
+
+# Editor backup files
+*.swp
+*.swo
+*~

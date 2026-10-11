@@ -121,6 +121,11 @@ void imv_canvas_clear(struct imv_canvas *canvas)
   cairo_restore(canvas->cairo);
 }
 
+void imv_canvas_invalidate_image(struct imv_canvas *canvas)
+{
+  if (canvas) canvas->cache.bitmap = NULL;
+}
+
 void imv_canvas_color(struct imv_canvas *canvas, float r, float g, float b, float a)
 {
   cairo_set_source_rgba(canvas->cairo, r, g, b, a);

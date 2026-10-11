@@ -49,6 +49,7 @@ static void next_frame(void *raw_pvt, struct imv_image **img, int *frametime)
 
   if (!WebPAnimDecoderHasMoreFrames(pvt->dec)) {
     WebPAnimDecoderReset(pvt->dec);
+    pvt->prev_timestamp = 0;
   }
 
   uint8_t *buf;
@@ -59,7 +60,7 @@ static void next_frame(void *raw_pvt, struct imv_image **img, int *frametime)
     return;
   }
 
-  *frametime = timestamp - pvt->prev_timestamp;
+  *frametime = pvt->anim_info.frame_count > 1 ? timestamp - pvt->prev_timestamp : 0;
   pvt->prev_timestamp = timestamp;
 
   struct imv_bitmap bmp = imv_bitmap_alloc(
@@ -148,7 +149,11 @@ close:
   if (fd >= 0)
     close(fd);
 
-  return open_memory_internal(priv, src);
+  enum backend_result result = open_memory_internal(priv, src);
+  if (result != BACKEND_SUCCESS && priv.is_mmaped) {
+    munmap((void *)priv.webp_data.bytes, priv.webp_data.size);
+  }
+  return result;
 }
 
 const struct imv_backend imv_backend_libwebp = {

@@ -4,6 +4,19 @@ imv Changelog
 UNRELEASED
 ----------
 
+* Reduce crop hint font size to 12, independently of the main overlay
+* Fix loader/IPC shutdown races, lost window events, and Wayland key repeat
+* Fix navigation and trash/undo for symbolic links, recursive directory cycles,
+  long command handling, self-rebinding, and malformed image input
+* Fix animated WebP loop timing and stale image texture caching
+* Ctrl+C starts a crop selection with the mouse; Enter saves a separate PNG
+  beside the original without overwriting existing files, Escape cancels
+* Ctrl+Z restores and selects the last file trashed in the current window;
+  keep the window open after trashing the last image so it can be restored
+* Delete moves the current file to the system trash and selects the next image;
+  previous navigation skips the trashed file
+* Opening a single image now loads its directory for next/previous navigation
+* Remove the separate imv-dir command, desktop entry, and manual page
 * Add support for CMYK jpeg files via optional LittleCMS dependency
 * Add support for animated WebP files
 * Fix libtiff backend on big endian hosts

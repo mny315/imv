@@ -209,13 +209,13 @@ void imv_console_input(struct imv_console *console, const char *text)
   }
 
   /* Don't allow newlines or control characters. */
-  if (*text == '\n' || iscntrl(*text)) {
+  if (*text == '\n' || iscntrl((unsigned char)*text)) {
     return;
   }
 
   /* Increase buffer size if needed */
   if (strlen(text) + strlen(console->buffer) + 1 > console->buffer_len) {
-    console->buffer_len *= 2;
+    console->buffer_len = strlen(text) + strlen(console->buffer) + 1;
     console->buffer = realloc(console->buffer, console->buffer_len);
     assert(console->buffer);
   }
@@ -224,7 +224,7 @@ void imv_console_input(struct imv_console *console, const char *text)
   size_t to_insert = strlen(text);
   size_t old_cursor = console->cursor;
   size_t new_cursor = console->cursor + to_insert;
-  size_t to_shift = strlen(console->buffer) - old_cursor;
+  size_t to_shift = strlen(console->buffer) - old_cursor + 1;
   memmove(&console->buffer[new_cursor], &console->buffer[old_cursor], to_shift);
   memcpy(&console->buffer[old_cursor], text, to_insert);
   console->cursor = new_cursor;
@@ -286,7 +286,7 @@ bool imv_console_key(struct imv_console *console, const char *key)
     /* memmove everything after the cursor left */
     size_t new_cursor = prev_char(console->buffer, console->cursor);
     size_t old_cursor = console->cursor;
-    size_t to_shift = strlen(console->buffer) - new_cursor;
+    size_t to_shift = strlen(console->buffer) - old_cursor + 1;
     memmove(&console->buffer[new_cursor], &console->buffer[old_cursor], to_shift);
     console->cursor = new_cursor;
     return true;

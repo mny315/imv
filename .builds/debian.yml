@@ -1,5 +1,6 @@
 image: debian/stable
 packages:
+  - libglib2.0-dev
   - asciidoc
   - clang
   - libcmocka-dev
@@ -27,7 +28,7 @@ packages:
   - wayland-protocols
   - xxd
 sources:
-  - https://git.sr.ht/~exec64/imv
+  - https://github.com/mny315/imv
 tasks:
   # libnsgif and libnsbmp aren't packaged by debian
   - gcc: |

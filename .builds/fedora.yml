@@ -1,5 +1,6 @@
 image: fedora/latest
 packages:
+  - glib2-devel
   - asciidoc
   - clang
   - inih-devel
@@ -26,7 +27,7 @@ packages:
   - wayland-protocols-devel
   - xxd
 sources:
-  - https://git.sr.ht/~exec64/imv
+  - https://github.com/mny315/imv
 tasks:
   # libnsgif and libnsbmp aren't packaged by fedora
   - gcc: |

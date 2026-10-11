@@ -24,10 +24,11 @@ Synopsis
 Authors
 -------
 
-imv-msg is written and maintained by Harry Jeffery <me@harry.pm>
+imv-msg was originally written by Harry Jeffery <me@harry.pm>
 
 Full source code and other information can be found at
-<https://sr.ht/~exec64/imv>.
+<https://github.com/mny315/imv>.
+The original project is <https://sr.ht/~exec64/imv>.
 
 See Also
 --------

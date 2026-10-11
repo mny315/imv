@@ -26,6 +26,9 @@ void imv_canvas_resize(struct imv_canvas *canvas, int width, int height);
 /* Blank the canvas to be empty and transparent */
 void imv_canvas_clear(struct imv_canvas *canvas);
 
+/* Reload textures after replacing the displayed image. */
+void imv_canvas_invalidate_image(struct imv_canvas *canvas);
+
 /* Set the current drawing color of the canvas */
 void imv_canvas_color(struct imv_canvas *canvas, float r, float g, float b, float a);
 

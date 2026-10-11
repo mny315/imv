@@ -1,6 +1,7 @@
 #include "list.h"
 
 #include <assert.h>
+#include <stdint.h>
 
 struct list *list_create(void)
 {
@@ -52,7 +53,7 @@ void list_remove(struct list *list, size_t index)
     return;
   }
 
-  memmove(&list->items[index], &list->items[index + 1], sizeof(void*) * (list->len - index));
+  memmove(&list->items[index], &list->items[index + 1], sizeof(void*) * (list->len - index - 1));
 
   list->len -= 1;
 }
@@ -121,17 +122,19 @@ char *list_to_string(struct list *list, const char *sep, size_t start)
   size_t sep_len = strlen(sep);
   for (size_t i = start; i < list->len; ++i) {
     size_t item_len = strlen(list->items[i]);
-    if (len + item_len + sep_len >= cap) {
-      cap *= 2;
+    assert(item_len < SIZE_MAX - len && sep_len < SIZE_MAX - len - item_len);
+    size_t required = len + item_len + sep_len + 1;
+    if (required > cap) {
+      cap = required;
       buf = realloc(buf, cap);
       assert(buf);
     }
-
-    strncat(buf, list->items[i], cap - 1);
+    memcpy(buf + len, list->items[i], item_len);
     len += item_len;
 
-    strncat(buf, sep, cap - 1);
+    memcpy(buf + len, sep, sep_len);
     len += sep_len;
+    buf[len] = '\0';
   }
   return buf;
 }

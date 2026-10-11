@@ -125,10 +125,18 @@ size_t imv_keyboard_get_text(struct imv_keyboard *keyboard, int scancode, char *
 
 void imv_keyboard_set_keymap(struct imv_keyboard *keyboard, const char *keymap)
 {
+  struct xkb_keymap *map = xkb_keymap_new_from_string(keyboard->context, keymap,
+      XKB_KEYMAP_FORMAT_TEXT_V1, XKB_KEYMAP_COMPILE_NO_FLAGS);
+  if (!map) return;
+  struct xkb_state *state = xkb_state_new(map);
+  if (!state) {
+    xkb_keymap_unref(map);
+    return;
+  }
   xkb_keymap_unref(keyboard->keymap);
-  keyboard->keymap = xkb_keymap_new_from_string(keyboard->context, keymap, XKB_KEYMAP_FORMAT_TEXT_V1, XKB_KEYMAP_COMPILE_NO_FLAGS);
+  keyboard->keymap = map;
   xkb_state_unref(keyboard->state);
-  keyboard->state = xkb_state_new(keyboard->keymap);
+  keyboard->state = state;
 }
 
 bool imv_keyboard_should_key_repeat(struct imv_keyboard *keyboard, int scancode)

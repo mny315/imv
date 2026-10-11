@@ -124,6 +124,9 @@ void imv_viewport_move(struct imv_viewport *view, int x, int y,
 void imv_viewport_scale_by(struct imv_viewport *view, const struct imv_image *image,
                        enum imv_zoom_source src, int mouse_x, int mouse_y, double scale_factor)
 {
+  if (!image || !isfinite(scale_factor) || scale_factor <= 0) {
+    return;
+  }
   double prev_scale = view->scale;
   int x, y;
 
@@ -238,6 +241,13 @@ void imv_viewport_center(struct imv_viewport *view, const struct imv_image *imag
 
 void imv_viewport_scale_to_window(struct imv_viewport *view, const struct imv_image *image)
 {
+  if (imv_image_width(image) <= 0 || imv_image_height(image) <= 0 ||
+      view->buffer.width <= 0 || view->buffer.height <= 0) {
+    view->scale = 1;
+    view->x = view->y = 0;
+    view->redraw = 1;
+    return;
+  }
   const int image_width = imv_image_width(image);
   const int image_height = imv_image_height(image);
   const double window_aspect = (double)view->buffer.width / (double)view->buffer.height;
@@ -257,6 +267,13 @@ void imv_viewport_scale_to_window(struct imv_viewport *view, const struct imv_im
 
 void imv_viewport_crop_to_window(struct imv_viewport *view, const struct imv_image *image)
 {
+  if (imv_image_width(image) <= 0 || imv_image_height(image) <= 0 ||
+      view->buffer.width <= 0 || view->buffer.height <= 0) {
+    view->scale = 1;
+    view->x = view->y = 0;
+    view->redraw = 1;
+    return;
+  }
   const int image_width = imv_image_width(image);
   const int image_height = imv_image_height(image);
   const double window_aspect = (double)view->buffer.width / (double)view->buffer.height;
@@ -280,6 +297,13 @@ void imv_viewport_set_redraw(struct imv_viewport *view)
 
 void imv_viewport_rescale(struct imv_viewport *view, const struct imv_image *image,
                           enum scaling_mode scaling_mode) {
+  if (imv_image_width(image) <= 0 || imv_image_height(image) <= 0 ||
+      view->buffer.width <= 0 || view->buffer.height <= 0) {
+    view->scale = 1;
+    view->x = view->y = 0;
+    view->redraw = 1;
+    return;
+  }
   if (scaling_mode == SCALING_NONE ||
       (scaling_mode == SCALING_DOWN
        && view->buffer.width > imv_image_width(image)

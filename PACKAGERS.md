@@ -35,6 +35,10 @@ passing `-D libpng=enabled` or `-D libtiff=disabled`.
 You can also make sure all the backends are enabled by passing
 `-D auto_features=enabled`.
 
+This fork always requires GIO for trash support and libpng >= 1.6 for crop
+export. Disabling the PNG input backend with `-Dlibpng=disabled` does not
+remove the libpng dependency.
+
 ## Building `imv`
 
 Once your backends have been configured and you've confirmed the library
@@ -45,3 +49,7 @@ of the [README](README.md) to build imv.
 
 Package the resulting binary and man pages in your operating system's native
 package format.
+
+There is one desktop entry, `imv.desktop`. Directory browsing is built into
+`imv`; the former `imv-dir` command, desktop entry, manual, and
+`contrib-commands` build option have been removed.

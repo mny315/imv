@@ -39,6 +39,7 @@ struct imv_event {
     struct {
       int button;
       bool pressed;
+      double x, y;
     } mouse_button;
     struct {
       double dx, dy;

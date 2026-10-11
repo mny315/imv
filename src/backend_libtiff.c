@@ -100,6 +100,7 @@ static void load_image(
 
   /* 1 = success, unlike the rest of *nix */
   if (rcode != 1) {
+    imv_bitmap_free(bmp);
     return;
   }
 
@@ -144,6 +145,7 @@ static enum backend_result open_memory(void *data, size_t len, struct imv_source
   }
   struct private *priv = malloc(sizeof *priv);
   if (!priv) {
+    fclose(f);
     return BACKEND_ERROR;
   }
   priv->tiff = TIFFClientOpen("-", "rm", (thandle_t)f, &mem_read, &mem_write, &mem_seek,
@@ -151,6 +153,7 @@ static enum backend_result open_memory(void *data, size_t len, struct imv_source
   if (!priv->tiff) {
     /* Header is read, so no BAD_PATH check here */
     free(priv);
+    fclose(f);
     return BACKEND_UNSUPPORTED;
   }
 

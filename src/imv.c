@@ -5,11 +5,13 @@
 #include <ctype.h>
 #include <errno.h>
 #include <getopt.h>
+#include <libgen.h>
 #include <limits.h>
 #include <pthread.h>
 #include <stdbool.h>
 #include <stdint.h>
 #include <stdlib.h>
+#include <sys/stat.h>
 #include <time.h>
 #include <unistd.h>
 #include <wordexp.h>
@@ -20,6 +22,7 @@
 #include "canvas.h"
 #include "commands.h"
 #include "console.h"
+#include "crop.h"
 #include "image.h"
 #include "ini.h"
 #include "ipc.h"
@@ -62,11 +65,11 @@ struct color_rgb {
 
 struct internal_event {
   enum internal_event_type type;
+  int source_id;
   union {
     struct {
       struct imv_image *image;
       int frametime;
-      bool is_new_image;
     } new_image;
     struct {
       char *path;
@@ -171,8 +174,18 @@ struct imv {
 
   struct imv_image *current_image;
 
+  struct {
+    bool active, dragging, selected, was_playing;
+    double start_x, start_y;
+    struct imv_crop_geometry geometry;
+    struct imv_crop_rect rect;
+    char *path;
+  } crop;
 
-  /* if specified by user, the path of the first image to display */
+  char *notice;
+  double notice_until;
+
+  /* path or index of the first image to display */
   char *starting_path;
 
   /* list of startup commands to be run on launch, after loading the config */
@@ -193,6 +206,8 @@ struct imv {
   struct backends *backends;
   struct imv_source *current_source;
   struct imv_source *last_source;
+  struct list *retired_sources;
+  gint shutting_down;
   struct imv_commands *commands;
   struct imv_console *console;
   struct imv_ipc *ipc;
@@ -215,6 +230,11 @@ static void command_rotate(struct list *args, const char *argstr, void *data);
 static void command_flip(struct list *args, const char *argstr, void *data);
 static void command_open(struct list *args, const char *argstr, void *data);
 static void command_close(struct list *args, const char *argstr, void *data);
+static void command_trash(struct list *args, const char *argstr, void *data);
+static void command_undo_trash(struct list *args, const char *argstr, void *data);
+static void command_crop(struct list *args, const char *argstr, void *data);
+static void command_crop_save(struct list *args, const char *argstr, void *data);
+static void command_crop_cancel(struct list *args, const char *argstr, void *data);
 static void command_fullscreen(struct list *args, const char *argstr, void *data);
 static void command_overlay(struct list *args, const char *argstr, void *data);
 static void command_exec(struct list *args, const char *argstr, void *data);
@@ -230,6 +250,7 @@ static void command_bind(struct list *args, const char *argstr, void *data);
 
 static bool setup_window(struct imv *imv);
 static void consume_internal_event(struct imv *imv, struct internal_event *event);
+static void discard_event(void *data, const struct imv_event *event);
 static void render_window(struct imv *imv);
 static void update_env_vars(struct imv *imv);
 static size_t generate_env_text(struct imv *imv, char *buf, size_t len, const char *format);
@@ -352,13 +373,46 @@ static double cur_time(void)
   return ts.tv_sec + (double)ts.tv_nsec * 0.000000001;
 }
 
+static void crop_cancel(struct imv *imv)
+{
+  if (imv->crop.active) {
+    imv_viewport_set_playing(imv->view, imv->crop.was_playing);
+    imv->crop.active = false;
+    imv->crop.dragging = false;
+    imv->crop.selected = false;
+    g_clear_pointer(&imv->crop.path, g_free);
+    imv->need_redraw = true;
+  }
+}
+
+static void show_notice(struct imv *imv, const char *text)
+{
+  g_free(imv->notice);
+  imv->notice = g_strdup(text);
+  imv->notice_until = cur_time() + 5;
+  imv->need_redraw = true;
+}
+
+static void discard_current_source(struct imv *imv)
+{
+  crop_cancel(imv);
+  struct imv_source *source = imv->current_source;
+  imv->current_source = NULL;
+  imv->last_source = NULL;
+  if (source) {
+    list_append(imv->retired_sources, source);
+  }
+  if (imv->next_frame.image) {
+    imv_image_free(imv->next_frame.image);
+  }
+  memset(&imv->next_frame, 0, sizeof imv->next_frame);
+  imv->loading = false;
+}
+
 static void source_callback(struct imv_source_message *msg)
 {
   struct imv *imv = msg->user_data;
-  if (msg->source != imv->current_source) {
-    /* We received a message from an old source, tidy up contents
-     * as required, but ignore it.
-     */
+  if (g_atomic_int_get(&imv->shutting_down)) {
     if (msg->image) {
       imv_image_free(msg->image);
     }
@@ -366,17 +420,11 @@ static void source_callback(struct imv_source_message *msg)
   }
 
   struct internal_event *event = calloc(1, sizeof *event);
+  event->source_id = imv_source_get_id(msg->source);
   if (msg->image) {
     event->type = NEW_IMAGE;
     event->data.new_image.image = msg->image;
     event->data.new_image.frametime = msg->frametime;
-
-    /* Keep track of the last source to send us an image in order to detect
-     * when we're getting a new image, as opposed to a new frame from the
-     * same image.
-     */
-    event->data.new_image.is_new_image = msg->source != imv->last_source;
-    imv->last_source = msg->source;
   } else {
     event->type = BAD_IMAGE;
   }
@@ -410,6 +458,15 @@ static void command_callback(const char *text, void *data)
 
 static void key_handler(struct imv *imv, const struct imv_event *event)
 {
+  if (imv->crop.active) {
+    const char *key = event->data.keyboard.keyname;
+    if (!strcmp(key, "Escape") || !strcmp(event->data.keyboard.description, "Ctrl+c")) {
+      command_crop_cancel(NULL, NULL, imv);
+    } else if (!strcmp(key, "Return") || !strcmp(key, "KP_Enter")) {
+      command_crop_save(NULL, NULL, imv);
+    }
+    return;
+  }
   if (imv_console_is_active(imv->console)) {
 
     if (imv_console_key(imv->console, event->data.keyboard.description)) {
@@ -454,6 +511,7 @@ static void event_handler(void *data, const struct imv_event *e)
       break;
     case IMV_EVENT_RESIZE:
       {
+        crop_cancel(imv);
         const int w = e->data.resize.buffer_width;
         const int h = e->data.resize.buffer_height;
         const double ui_scale = e->data.resize.scale;
@@ -466,13 +524,38 @@ static void event_handler(void *data, const struct imv_event *e)
       key_handler(imv, e);
       break;
     case IMV_EVENT_MOUSE_MOTION:
-      if (imv_window_get_mouse_button(imv->window, 1)) {
+      if (imv->crop.active) {
+        if (imv->crop.dragging) {
+          imv->crop.selected = imv_crop_select(&imv->crop.geometry,
+              imv->crop.start_x, imv->crop.start_y,
+              e->data.mouse_motion.x, e->data.mouse_motion.y, &imv->crop.rect);
+          imv->need_redraw = true;
+        }
+      } else if (imv_window_get_mouse_button(imv->window, 1)) {
         imv_viewport_move(imv->view, e->data.mouse_motion.dx,
             e->data.mouse_motion.dy, imv->current_image);
       }
       break;
+    case IMV_EVENT_MOUSE_BUTTON:
+      if (imv->crop.active && e->data.mouse_button.button == 1) {
+        double x = e->data.mouse_button.x, y = e->data.mouse_button.y;
+        if (e->data.mouse_button.pressed) {
+          g_clear_pointer(&imv->notice, g_free);
+          imv->crop.start_x = x;
+          imv->crop.start_y = y;
+          imv->crop.dragging = true;
+          imv->crop.selected = false;
+        } else if (imv->crop.dragging) {
+          imv->crop.selected = imv_crop_select(&imv->crop.geometry,
+              imv->crop.start_x, imv->crop.start_y, x, y, &imv->crop.rect);
+          imv->crop.dragging = false;
+        }
+        imv->need_redraw = true;
+      }
+      break;
     case IMV_EVENT_MOUSE_SCROLL:
       {
+        if (imv->crop.active) break;
         double x, y;
         imv_window_get_mouse_position(imv->window, &x, &y);
         imv_viewport_zoom(imv->view, imv->current_image, IMV_ZOOM_MOUSE,
@@ -481,6 +564,7 @@ static void event_handler(void *data, const struct imv_event *e)
       break;
     case IMV_EVENT_GESTURE_PINCH:
       {
+        if (imv->crop.active) break;
         double x, y;
         imv_window_get_mouse_position(imv->window, &x, &y);
         imv_viewport_move(imv->view, e->data.gesture_pinch.dx,
@@ -561,6 +645,7 @@ struct imv *imv_create(void)
   }
   imv->binds = imv_binds_create();
   imv->navigator = imv_navigator_create();
+  imv->retired_sources = list_create();
   imv->commands = imv_commands_create();
   imv->console = imv_console_create();
   imv_console_set_command_callback(imv->console, &command_callback, imv);
@@ -597,6 +682,11 @@ struct imv *imv_create(void)
   imv_command_register(imv->commands, "flip", &command_flip);
   imv_command_register(imv->commands, "open", &command_open);
   imv_command_register(imv->commands, "close", &command_close);
+  imv_command_register(imv->commands, "trash", &command_trash);
+  imv_command_register(imv->commands, "undo_trash", &command_undo_trash);
+  imv_command_register(imv->commands, "crop", &command_crop);
+  imv_command_register(imv->commands, "crop_save", &command_crop_save);
+  imv_command_register(imv->commands, "crop_cancel", &command_crop_cancel);
   imv_command_register(imv->commands, "fullscreen", &command_fullscreen);
   imv_command_register(imv->commands, "overlay", &command_overlay);
   imv_command_register(imv->commands, "exec", &command_exec);
@@ -636,6 +726,9 @@ struct imv *imv_create(void)
   add_bind(imv, "h", "pan 50 0");
   add_bind(imv, "l", "pan -50 0");
   add_bind(imv, "x", "close");
+  add_bind(imv, "<Delete>", "trash");
+  add_bind(imv, "<Ctrl+z>", "undo_trash");
+  add_bind(imv, "<Ctrl+c>", "crop");
   add_bind(imv, "f", "fullscreen");
   add_bind(imv, "d", "overlay");
   add_bind(imv, "p", "exec echo $imv_current_file");
@@ -660,18 +753,29 @@ struct imv *imv_create(void)
 
 void imv_free(struct imv *imv)
 {
+  g_atomic_int_set(&imv->shutting_down, true);
+  imv_ipc_free(imv->ipc);
+  if (imv->current_source) {
+    imv_source_free(imv->current_source);
+  }
+  for (size_t i = 0; i < imv->retired_sources->len; ++i) {
+    imv_source_free(imv->retired_sources->items[i]);
+  }
+  list_free(imv->retired_sources);
+  if (imv->window) {
+    imv_window_pump_events(imv->window, discard_event, NULL);
+  }
+  imv_log_remove_log_callback(log_to_stderr);
+  g_free(imv->crop.path);
+  g_free(imv->notice);
   free(imv->overlay.font.name);
   free(imv->title_text);
   free(imv->app_id);
   free(imv->overlay.text);
   imv_binds_free(imv->binds);
   imv_navigator_free(imv->navigator);
-  if (imv->current_source) {
-    imv_source_free(imv->current_source);
-  }
   imv_commands_free(imv->commands);
   imv_console_free(imv->console);
-  imv_ipc_free(imv->ipc);
   imv_viewport_free(imv->view);
   imv_canvas_free(imv->canvas);
   if (imv->current_image) {
@@ -689,8 +793,8 @@ void imv_free(struct imv *imv)
 
   backends_free(imv->backends);
 
-  list_free(imv->startup_commands);
-  list_free(imv->image_change_commands);
+  if (imv->startup_commands) list_deep_free(imv->startup_commands);
+  list_deep_free(imv->image_change_commands);
 
   free(imv);
 }
@@ -800,8 +904,8 @@ static bool parse_initial_width(struct imv *imv, const char *width_value)
 {
   char *endptr;
   errno = 0;
-  int val_x = strtol(width_value, &endptr, 10);
-  if(errno != 0 || *endptr != '\0' || endptr == width_value) {
+  long val_x = strtol(width_value, &endptr, 10);
+  if(errno != 0 || *endptr != '\0' || endptr == width_value || val_x <= 0 || val_x > INT_MAX) {
     return false;
   }
   imv->initial_width = val_x;
@@ -812,8 +916,8 @@ static bool parse_initial_height(struct imv *imv, const char *height_value)
 {
   char *endptr;
   errno = 0;
-  int val_y = strtol(height_value, &endptr, 10);
-  if(errno != 0 || *endptr != '\0' || endptr == height_value) {
+  long val_y = strtol(height_value, &endptr, 10);
+  if(errno != 0 || *endptr != '\0' || endptr == height_value || val_y <= 0 || val_y > INT_MAX) {
     return false;
   }
   imv->initial_height = val_y;
@@ -828,7 +932,13 @@ static void *pipe_stdin(void *data)
     ssize_t err = read(STDIN_FILENO, buf, PIPE_BUF);
     if (err > 0) {
       /* writes up to PIPE_BUF are atomic */
-      write(*fd, buf, err);
+      ssize_t offset = 0;
+      while (offset < err) {
+        ssize_t written = write(*fd, buf + offset, err - offset);
+        if (written < 0 && errno == EINTR) continue;
+        if (written <= 0) return NULL;
+        offset += written;
+      }
     } else if (err == 0 || errno != EINTR) {
       /* break if EOF or actual read error */
       break;
@@ -844,13 +954,10 @@ static void *load_paths_from_stdin(void *data)
 
   imv_log(IMV_INFO, "Reading paths from stdin...\n");
 
-  char buf[PATH_MAX];
-  while (fgets(buf, sizeof(buf), imv->stdin_pipe) != NULL) {
-    size_t len = strlen(buf);
-    if (len == 0 || len >= PATH_MAX) {
-      imv_log(IMV_ERROR, "Failed to read path from stdin. Aborting.\n");
-      abort();
-    }
+  char *buf = NULL;
+  size_t capacity = 0;
+  ssize_t len;
+  while ((len = getline(&buf, &capacity, imv->stdin_pipe)) > 0) {
     if (buf[len-1] == '\n') {
       buf[--len] = 0;
     }
@@ -868,6 +975,7 @@ static void *load_paths_from_stdin(void *data)
       imv_window_push_event(imv->window, &e);
     }
   }
+  free(buf);
   return NULL;
 }
 
@@ -879,7 +987,7 @@ static void print_help(struct imv *imv)
   print_backend_infos(imv->backends);
 
   puts("imv's full source code is published under the terms of the MIT\n"
-       "license, and can be found at https://sr.ht/~exec64/imv\n"
+       "license, and can be found at https://github.com/mny315/imv\n"
        "\n"
        "imv uses the inih library to parse ini files.\n"
        "See https://github.com/benhoyt/inih for details.\n"
@@ -960,6 +1068,28 @@ bool imv_parse_args(struct imv *imv, int argc, char **argv)
   argc -= optind;
   argv += optind;
 
+  /* A single file opens its directory, starting at the requested image. */
+  struct stat path_info;
+  if (argc == 1 && strcmp(argv[0], "-") &&
+      stat(argv[0], &path_info) == 0 && S_ISREG(path_info.st_mode)) {
+    char *path = strdup(argv[0]);
+    if (!path) {
+      imv_log(IMV_ERROR, "Failed to allocate directory path. Aborting.\n");
+      return false;
+    }
+    imv_add_path(imv, dirname(path));
+    free(path);
+
+    /* Keep the file accessible even if its directory cannot be listed. */
+    if (imv_navigator_find_path(imv->navigator, argv[0]) == -1) {
+      imv_add_path(imv, argv[0]);
+    }
+    if (!imv->starting_path) {
+      imv->starting_path = argv[0];
+    }
+    return true;
+  }
+
   /* if no paths are given as args, expect them from stdin */
   if (argc == 0) {
     imv->paths_from_stdin = true;
@@ -1026,9 +1156,23 @@ int imv_run(struct imv *imv)
      * load_paths_from_stdin() will not exit until the child dies */
     set_cloexec(stdin_pipe_fds[1]);
     imv->stdin_pipe = fdopen(stdin_pipe_fds[0], "re");
-
-    if (pthread_create(&load_paths_thread, NULL, load_paths_from_stdin, imv)
-        || pthread_create(&pipe_stdin_thread, NULL, pipe_stdin, stdin_pipe_fds + 1)) {
+    if (!imv->stdin_pipe) {
+      close(stdin_pipe_fds[0]);
+      close(stdin_pipe_fds[1]);
+      free(stdin_pipe_fds);
+      return 1;
+    }
+    if (pthread_create(&load_paths_thread, NULL, load_paths_from_stdin, imv)) {
+      fclose(imv->stdin_pipe);
+      close(stdin_pipe_fds[1]);
+      free(stdin_pipe_fds);
+      return 1;
+    }
+    if (pthread_create(&pipe_stdin_thread, NULL, pipe_stdin, stdin_pipe_fds + 1)) {
+      close(stdin_pipe_fds[1]);
+      pthread_join(load_paths_thread, NULL);
+      fclose(imv->stdin_pipe);
+      free(stdin_pipe_fds);
       return 1;
     }
   }
@@ -1088,7 +1232,7 @@ int imv_run(struct imv *imv)
   for (size_t i = 0; i < imv->startup_commands->len; ++i) {
     command_callback(imv->startup_commands->items[i], imv);
   }
-  list_free(imv->startup_commands);
+  list_deep_free(imv->startup_commands);
   imv->startup_commands = NULL;
 
   /* time keeping */
@@ -1097,6 +1241,13 @@ int imv_run(struct imv *imv)
 
 
   while (!imv->quit) {
+    for (size_t i = imv->retired_sources->len; i-- > 0;) {
+      struct imv_source *source = imv->retired_sources->items[i];
+      if (!imv_source_is_busy(source)) {
+        imv_source_free(source);
+        list_remove(imv->retired_sources, i);
+      }
+    }
 
     /* Check if navigator wrapped around paths lists */
     if (!imv->loop_input && imv_navigator_wrapped(imv->navigator)) {
@@ -1131,9 +1282,7 @@ int imv_run(struct imv *imv)
         }
 
         if (result == BACKEND_SUCCESS) {
-          if (imv->current_source) {
-            imv_source_async_free(imv->current_source);
-          }
+          discard_current_source(imv);
           imv->current_source = new_source;
           imv_source_set_callback(imv->current_source, &source_callback, imv);
           imv_source_async_load_first_frame(imv->current_source);
@@ -1150,10 +1299,13 @@ int imv_run(struct imv *imv)
         }
       } else {
         /* No image currently selected */
+        discard_current_source(imv);
+        imv_viewport_set_playing(imv->view, false);
         if (imv->current_image) {
           imv_image_free(imv->current_image);
           imv->current_image = NULL;
         }
+        imv->need_redraw = true;
       }
     }
 
@@ -1166,10 +1318,10 @@ int imv_run(struct imv *imv)
 
     /* Check if a new frame is due */
     bool should_change_frame = false;
-    if (imv->next_frame.force_next_frame && imv->next_frame.image) {
+    if (!imv->crop.active && imv->next_frame.force_next_frame && imv->next_frame.image) {
       should_change_frame = true;
     }
-    if (imv_viewport_is_playing(imv->view) && imv->next_frame.image
+    if (!imv->crop.active && imv_viewport_is_playing(imv->view) && imv->next_frame.image
         && imv->next_frame.due && imv->next_frame.due <= current_time) {
       should_change_frame = true;
     }
@@ -1179,6 +1331,7 @@ int imv_run(struct imv *imv)
         imv_image_free(imv->current_image);
       }
       imv->current_image = imv->next_frame.image;
+      imv_canvas_invalidate_image(imv->canvas);
       imv->next_frame.image = NULL;
       imv->next_frame.due = current_time + imv->next_frame.duration;
       imv->next_frame.duration = 0;
@@ -1193,7 +1346,7 @@ int imv_run(struct imv *imv)
     }
 
     /* handle slideshow */
-    if (imv_viewport_is_playing(imv->view) && imv->slideshow.duration != 0.0) {
+    if (!imv->crop.active && imv_viewport_is_playing(imv->view) && imv->slideshow.duration != 0.0) {
       double dt = current_time - last_time;
 
       imv->slideshow.elapsed += dt;
@@ -1206,6 +1359,10 @@ int imv_run(struct imv *imv)
 
     last_time = current_time;
 
+    if (imv->notice && current_time >= imv->notice_until) {
+      g_clear_pointer(&imv->notice, g_free);
+      imv->need_redraw = true;
+    }
     /* check if the viewport needs a redraw */
     if (imv_viewport_needs_redraw(imv->view)) {
       imv->need_redraw = true;
@@ -1303,10 +1460,12 @@ static bool setup_window(struct imv *imv)
 
 static void handle_new_image(struct imv *imv, struct imv_image *image, int frametime)
 {
+  crop_cancel(imv);
   if (imv->current_image) {
     imv_image_free(imv->current_image);
   }
   imv->current_image = image;
+  imv_canvas_invalidate_image(imv->canvas);
   imv->need_redraw = true;
   imv->need_rescale = true;
   imv->loading = false;
@@ -1334,11 +1493,33 @@ static void handle_new_frame(struct imv *imv, struct imv_image *image, int frame
   imv->next_frame.duration = frametime * 0.001;
 }
 
+static void discard_event(void *data, const struct imv_event *event)
+{
+  (void)data;
+  if (event->type != IMV_EVENT_CUSTOM) return;
+  struct internal_event *internal = event->data.custom;
+  if (internal->type == NEW_IMAGE) imv_image_free(internal->data.new_image.image);
+  if (internal->type == NEW_PATH) free(internal->data.new_path.path);
+  if (internal->type == COMMAND) free(internal->data.command.text);
+  free(internal);
+}
+
 static void consume_internal_event(struct imv *imv, struct internal_event *event)
 {
+  /* A trash/undo command can change the source after a loader queued a reply. */
+  if ((event->type == NEW_IMAGE || event->type == BAD_IMAGE) &&
+      (!imv->current_source || imv_navigator_has_pending_change(imv->navigator) ||
+       event->source_id != imv_source_get_id(imv->current_source))) {
+    if (event->type == NEW_IMAGE) {
+      imv_image_free(event->data.new_image.image);
+    }
+    free(event);
+    return;
+  }
   if (event->type == NEW_IMAGE) {
     /* New image vs just a new frame of the same image */
-    if (event->data.new_image.is_new_image) {
+    if (imv->last_source != imv->current_source) {
+      imv->last_source = imv->current_source;
       handle_new_image(imv, event->data.new_image.image, event->data.new_image.frametime);
     } else {
       handle_new_frame(imv, event->data.new_image.image, event->data.new_image.frametime);
@@ -1350,11 +1531,7 @@ static void consume_internal_event(struct imv *imv, struct internal_event *event
 
     /* Special case: the image came from stdin */
     if (strcmp(err_path, "-") == 0) {
-      if (imv->stdin_image_data) {
-        free(imv->stdin_image_data);
-        imv->stdin_image_data = NULL;
-        imv->stdin_image_data_len = 0;
-      }
+      /* A backend can still hold this buffer until its source is freed. */
       imv_log(IMV_ERROR, "Failed to load image from stdin.\n");
     }
 
@@ -1422,6 +1599,37 @@ static void render_window(struct imv *imv)
   imv_window_get_framebuffer_size(imv->window, &w, &h);
   int ui_scale = imv_window_get_scale(imv->window);
 
+  if (imv->crop.active) {
+    int left = 0, top = 0, right = 0, bottom = 0;
+    if (imv->crop.selected) {
+      const struct imv_crop_geometry *g = &imv->crop.geometry;
+      const struct imv_crop_rect *r = &imv->crop.rect;
+      left = CLAMP(g->x + r->x * g->scale, 0, w);
+      top = CLAMP(g->y + r->y * g->scale, 0, h);
+      right = CLAMP(g->x + (r->x + r->width) * g->scale, 0, w);
+      bottom = CLAMP(g->y + (r->y + r->height) * g->scale, 0, h);
+    }
+    imv_canvas_color(imv->canvas, 0, 0, 0, 0.5);
+    imv_canvas_fill_rectangle(imv->canvas, 0, 0, w, top);
+    imv_canvas_fill_rectangle(imv->canvas, 0, bottom, w, h - bottom);
+    imv_canvas_fill_rectangle(imv->canvas, 0, top, left, bottom - top);
+    imv_canvas_fill_rectangle(imv->canvas, right, top, w - right, bottom - top);
+    if (imv->crop.selected) {
+      imv_canvas_color(imv->canvas, 1, 1, 1, 1);
+      imv_canvas_fill_rectangle(imv->canvas, left, top, right - left, ui_scale);
+      imv_canvas_fill_rectangle(imv->canvas, left, bottom - ui_scale, right - left, ui_scale);
+      imv_canvas_fill_rectangle(imv->canvas, left, top, ui_scale, bottom - top);
+      imv_canvas_fill_rectangle(imv->canvas, right - ui_scale, top, ui_scale, bottom - top);
+    }
+  }
+
+  if (!imv_navigator_length(imv->navigator) &&
+      imv_navigator_can_undo_trash(imv->navigator)) {
+    imv_canvas_color(imv->canvas, 1, 1, 1, 1);
+    imv_canvas_printf(imv->canvas, 20 * ui_scale, 40 * ui_scale,
+        "No images. Press Ctrl+Z to undo.");
+  }
+
   /* if the overlay needs to be drawn, draw that too */
   if (imv->overlay.enabled) {
     char overlay_text[1024];
@@ -1455,6 +1663,29 @@ static void render_window(struct imv *imv)
     g_object_unref(layout);
   }
 
+  if (imv->crop.active || imv->notice) {
+    imv_canvas_font(imv->canvas, imv->overlay.font.name, 12 * ui_scale);
+    char hint[256];
+    if (imv->crop.selected) {
+      snprintf(hint, sizeof hint, "Crop: %d x %d px | Enter: save | Esc: cancel",
+          imv->crop.rect.width, imv->crop.rect.height);
+    } else {
+      snprintf(hint, sizeof hint, "Crop: drag with left mouse button | Enter: save | Esc: cancel");
+    }
+    PangoLayout *layout = imv_canvas_make_layout(imv->canvas,
+        imv->notice ? imv->notice : hint);
+    int width, height;
+    pango_layout_get_pixel_size(layout, &width, &height);
+    const int pad = 5 * ui_scale;
+    imv_canvas_color(imv->canvas, 0, 0, 0, 0.85);
+    imv_canvas_fill_rectangle(imv->canvas, 0, h - height - pad * 2,
+        width + pad * 2, height + pad * 2);
+    imv_canvas_color(imv->canvas, 1, 1, 1, 1);
+    imv_canvas_show_layout(imv->canvas, pad, h - height - pad, layout);
+    g_object_unref(layout);
+    imv_canvas_font(imv->canvas, imv->overlay.font.name, imv->overlay.font.size * ui_scale);
+  }
+
   /* draw command entry bar if needed */
   if (imv_console_prompt(imv->console)) {
     const int bottom_offset = 5 * ui_scale;
@@ -1468,7 +1699,7 @@ static void render_window(struct imv *imv)
     /* draw pre-cursor text */
     x += imv_canvas_printf(imv->canvas, x, h - height - bottom_offset,
         ":%.*s",
-        imv_console_prompt_cursor(imv->console),
+        (int)MIN(INT_MAX, imv_console_prompt_cursor(imv->console)),
         imv_console_prompt(imv->console));
     /* draw the cursor */
     imv_canvas_color(imv->canvas, 1, 1, 1, 0.5);
@@ -1713,6 +1944,7 @@ static void command_pan(struct list *args, const char *argstr, void *data)
 {
   (void)argstr;
   struct imv *imv = data;
+  crop_cancel(imv);
   if (args->len != 3) {
     return;
   }
@@ -1727,6 +1959,7 @@ static void command_next(struct list *args, const char *argstr, void *data)
 {
   (void)argstr;
   struct imv *imv = data;
+  crop_cancel(imv);
   long int index = 1;
 
   if (args->len >= 2) {
@@ -1743,12 +1976,17 @@ static void command_prev(struct list *args, const char *argstr, void *data)
 {
   (void)argstr;
   struct imv *imv = data;
+  crop_cancel(imv);
   long int index = 1;
 
   if (args->len >= 2) {
     index = strtol(args->items[1], NULL, 10);
   }
 
+  if (index == LONG_MIN) {
+    size_t length = imv_navigator_length(imv->navigator);
+    index = length ? index % (long)length : 0;
+  }
   imv_navigator_select_rel(imv->navigator, -index);
   imv_viewport_reset_transform(imv->view);
 
@@ -1759,6 +1997,7 @@ static void command_goto(struct list *args, const char *argstr, void *data)
 {
   (void)argstr;
   struct imv *imv = data;
+  crop_cancel(imv);
   if (args->len != 2) {
     return;
   }
@@ -1774,6 +2013,7 @@ static void command_zoom(struct list *args, const char *argstr, void *data)
 {
   (void)argstr;
   struct imv *imv = data;
+  crop_cancel(imv);
   if (args->len == 2) {
     const char *str = args->items[1];
     if (!strcmp(str, "actual")) {
@@ -1794,6 +2034,7 @@ static void command_rotate(struct list *args, const char *argstr, void *data)
 {
   (void)argstr;
   struct imv *imv = data;
+  crop_cancel(imv);
   if (args->len == 3) {
     if (!strcmp(args->items[1], "by")) {
       double degrees = strtod(args->items[2], NULL);
@@ -1809,6 +2050,7 @@ static void command_flip(struct list *args, const char *argstr, void *data)
 {
   (void)argstr;
   struct imv *imv = data;
+  crop_cancel(imv);
   if (args->len == 2) {
     if (!strcmp(args->items[1], "vertical")) {
       imv_viewport_flip_v(imv->view);
@@ -1829,7 +2071,7 @@ static void command_open(struct list *args, const char *argstr, void *data)
 
   update_env_vars(imv);
   /* allow -r arg to specify recursive */
-  if (memcmp(argstr, "-r", 2) == 0) {
+  if (!strncmp(argstr, "-r", 2) && (!argstr[2] || argstr[2] == ' ')) {
     argstr += 2;
     recursive = true;
   }
@@ -1848,6 +2090,7 @@ static void command_close(struct list *args, const char *argstr, void *data)
   (void)args;
   (void)argstr;
   struct imv *imv = data;
+  crop_cancel(imv);
   size_t index = imv_navigator_index(imv->navigator);
 
   if (args->len == 2) {
@@ -1864,6 +2107,126 @@ static void command_close(struct list *args, const char *argstr, void *data)
   imv_navigator_remove_at(imv->navigator, index);
 
   imv->slideshow.elapsed = 0;
+}
+
+static void command_trash(struct list *args, const char *argstr, void *data)
+{
+  (void)args;
+  (void)argstr;
+  struct imv *imv = data;
+
+  /* Do not trash a file that has not been displayed yet. */
+  if (imv->loading || !imv->current_image ||
+      !imv_navigator_trash(imv->navigator)) {
+    return;
+  }
+
+  discard_current_source(imv);
+  imv_viewport_reset_transform(imv->view);
+  imv->slideshow.elapsed = 0;
+  imv->need_redraw = true;
+  if (imv_navigator_length(imv->navigator) == 0) {
+    imv_image_free(imv->current_image);
+    imv->current_image = NULL;
+    imv_viewport_set_playing(imv->view, false);
+  }
+}
+
+static void command_undo_trash(struct list *args, const char *argstr, void *data)
+{
+  (void)args;
+  (void)argstr;
+  struct imv *imv = data;
+  if (!imv_navigator_undo_trash(imv->navigator)) {
+    return;
+  }
+
+  discard_current_source(imv);
+  imv_viewport_reset_transform(imv->view);
+  imv->slideshow.elapsed = 0;
+  imv->need_redraw = true;
+}
+
+static void command_crop(struct list *args, const char *argstr, void *data)
+{
+  (void)args;
+  (void)argstr;
+  struct imv *imv = data;
+  if (imv->crop.active) {
+    command_crop_cancel(NULL, NULL, imv);
+    return;
+  }
+  if (!imv->current_image || imv->loading ||
+      imv_navigator_has_pending_change(imv->navigator)) {
+    show_notice(imv, "Wait for an image to finish loading before cropping.");
+    return;
+  }
+  if (imv->need_rescale) {
+    imv->need_rescale = false;
+    imv_viewport_rescale(imv->view, imv->current_image, imv->scaling_mode);
+  }
+  int x, y;
+  double scale, rotation;
+  bool mirrored;
+  imv_viewport_get_offset(imv->view, &x, &y);
+  imv_viewport_get_scale(imv->view, &scale);
+  imv_viewport_get_rotation(imv->view, &rotation);
+  imv_viewport_get_mirrored(imv->view, &mirrored);
+  if (!imv_crop_geometry(imv->current_image, x, y, scale, rotation, mirrored,
+        &imv->crop.geometry)) {
+    show_notice(imv, "Cannot crop this image.");
+    return;
+  }
+  imv->crop.path = g_strdup(imv_navigator_selection(imv->navigator));
+  imv->crop.was_playing = imv_viewport_is_playing(imv->view);
+  imv_viewport_set_playing(imv->view, false);
+  imv->crop.active = true;
+  imv->crop.selected = false;
+  imv->crop.dragging = false;
+  g_clear_pointer(&imv->notice, g_free);
+  imv->need_redraw = true;
+}
+
+static void command_crop_save(struct list *args, const char *argstr, void *data)
+{
+  (void)args;
+  (void)argstr;
+  struct imv *imv = data;
+  if (!imv->crop.active) {
+    return;
+  }
+  if (!imv->crop.selected) {
+    show_notice(imv, "Select an area with the left mouse button first.");
+    return;
+  }
+  GError *error = NULL;
+  char *path = imv_crop_save(imv->current_image, &imv->crop.geometry,
+      &imv->crop.rect, imv->crop.path, &error);
+  if (!path) {
+    show_notice(imv, error->message);
+    imv_log(IMV_ERROR, "Crop: %s\n", error->message);
+    g_error_free(error);
+    return;
+  }
+  imv_navigator_add(imv->navigator, path, 0);
+  crop_cancel(imv);
+  char *basename = g_path_get_basename(path);
+  char *message = g_strdup_printf("Saved: %s", basename);
+  show_notice(imv, message);
+  imv_log(IMV_INFO, "Saved crop: %s\n", path);
+  g_free(message);
+  g_free(basename);
+  g_free(path);
+}
+
+static void command_crop_cancel(struct list *args, const char *argstr, void *data)
+{
+  (void)args;
+  (void)argstr;
+  struct imv *imv = data;
+  crop_cancel(imv);
+  g_clear_pointer(&imv->notice, g_free);
+  imv->need_redraw = true;
 }
 
 static void command_fullscreen(struct list *args, const char *argstr, void *data)
@@ -1897,6 +2260,7 @@ static void command_center(struct list *args, const char *argstr, void *data)
   (void)args;
   (void)argstr;
   struct imv *imv = data;
+  crop_cancel(imv);
   imv_viewport_center(imv->view, imv->current_image);
 }
 
@@ -1905,6 +2269,7 @@ static void command_reset(struct list *args, const char *argstr, void *data)
   (void)args;
   (void)argstr;
   struct imv *imv = data;
+  crop_cancel(imv);
   imv_viewport_reset_transform(imv->view);
   imv->need_rescale = true;
   imv->need_redraw = true;
@@ -1915,6 +2280,7 @@ static void command_next_frame(struct list *args, const char *argstr, void *data
   (void)args;
   (void)argstr;
   struct imv *imv = data;
+  crop_cancel(imv);
   if (imv->current_source) {
     imv_source_async_load_next_frame(imv->current_source);
     imv->next_frame.force_next_frame = true;
@@ -1926,6 +2292,7 @@ static void command_toggle_playing(struct list *args, const char *argstr, void *
   (void)args;
   (void)argstr;
   struct imv *imv = data;
+  crop_cancel(imv);
   imv_viewport_toggle_playing(imv->view);
 }
 
@@ -1934,6 +2301,7 @@ static void command_set_scaling_mode(struct list *args, const char *argstr, void
   (void)args;
   (void)argstr;
   struct imv *imv = data;
+  crop_cancel(imv);
 
   if (args->len != 2) {
     return;

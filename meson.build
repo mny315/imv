@@ -25,7 +25,6 @@ add_project_arguments('-DRSVG_DISABLE_DEPRECATION_WARNINGS', language: 'c')
 add_project_arguments('-DCMOCKA_DISABLE_DEPRECATION_WARNINGS', language: 'c')
 
 cc = meson.get_compiler('c')
-dep_null = dependency('', required: false)
 m_dep = cc.find_library('m', required : false)
 
 _windows = get_option('windows')
@@ -60,6 +59,8 @@ endif
 
 deps_for_imv = [
   dependency('pangocairo'),
+  dependency('gio-2.0'),
+  dependency('libpng', version: '>=1.6'),
   gl_dep,
   dependency('threads'),
   dependency('xkbcommon'),
@@ -75,6 +76,8 @@ files_common = files(
   'src/canvas.c',
   'src/commands.c',
   'src/console.c',
+  'src/crop.c',
+  'src/event_queue.c',
   'src/image.c',
   'src/imv.c',
   'src/ipc.c',
@@ -84,6 +87,7 @@ files_common = files(
   'src/log.c',
   'src/navigator.c',
   'src/source.c',
+  'src/trash.c',
   'src/viewport.c',
 )
 
@@ -136,8 +140,6 @@ if build_x11
   ]
   enabled_window_systems += 'x11'
 endif
-
-files_msg = files('src/imv_msg.c', 'src/ipc_common.c')
 
 enabled_backends = []
 supported_mime_types = []
@@ -220,14 +222,6 @@ foreach ws : ['wayland', 'x11']
   endif
 endforeach
 
-if get_option('contrib-commands')
-  install_data(
-    files('contrib/imv-dir'),
-    install_dir: get_option('bindir'),
-    install_mode: 'rwxr-xr-x',
-  )
-endif
-
 if not target_single_ws
   configure_file(
     input: 'files/imv.in',
@@ -240,25 +234,15 @@ if not target_single_ws
   )
 endif
 
-desktop_list = [
-  'imv',
-]
-if get_option('contrib-commands')
-  desktop_list += [
-    'imv-dir',
-  ]
-endif
-foreach desktop: desktop_list
-  configure_file(
-    input: 'files/@0@.desktop.in'.format(desktop),
-    output: '@0@.desktop'.format(desktop),
-    install_dir: '@0@/applications'.format(get_option('datadir')),
-    install_mode: 'rw-r--r--',
-    configuration: {
-      'supported_mime_types': ';'.join(supported_mime_types)
-    }
-  )
-endforeach
+configure_file(
+  input: 'files/imv.desktop.in',
+  output: 'imv.desktop',
+  install_dir: get_option('datadir') / 'applications',
+  install_mode: 'rw-r--r--',
+  configuration: {
+    'supported_mime_types': ';'.join(supported_mime_types)
+  }
+)
 
 install_data(
   files('files/imv_config'),
@@ -268,6 +252,41 @@ install_data(
 
 dep_cmocka = dependency('cmocka', required: get_option('test'))
 xxd = find_program('xxd', required: get_option('test'))
+
+if not get_option('test').disabled()
+  foreach test : ['trash', 'source', 'crop', 'regressions', 'image_loading', 'ipc']
+    test(
+      'test_@0@'.format(test),
+      executable(
+        'test_@0@'.format(test),
+        files('test/@0@.c'.format(test), 'src/platform_dummy.c'),
+        link_with: libimv,
+        include_directories: include_directories('src'),
+        dependencies: deps_for_imv,
+        c_args: ['-DIMV_TEST_DATA="@0@/test/data"'.format(meson.current_source_dir())],
+      )
+    )
+  endforeach
+  if build_wayland
+    test('test_wayland', executable('test_wayland',
+      files('test/wayland.c', 'src/platform_posix.c'), targets_wayland,
+      link_with: libimv,
+      include_directories: include_directories('src'),
+      dependencies: [deps_for_imv, deps_for_wayland],
+    ))
+  endif
+  test(
+    'test_crop_ui',
+    executable(
+      'test_crop_ui',
+      files('test/crop_ui.c', 'src/dummy_window.c', 'src/platform_dummy.c'),
+      link_with: libimv,
+      include_directories: include_directories('src'),
+      dependencies: deps_for_imv,
+      c_args: ['-DIMV_TEST_CONFIG="@0@/files/imv_config"'.format(meson.current_source_dir())],
+    )
+  )
+endif
 
 if dep_cmocka.found() and xxd.found()
   embed = generator(
@@ -310,12 +329,6 @@ if prog_a2x.found()
     [1, 'imv-msg'],
     [5, 'imv'],
   ]
-  if get_option('contrib-commands')
-    man_list += [
-      [1, 'imv-dir'],
-    ]
-  endif
-
   foreach man : man_list
     _section = man[0]
     _topic = man[1]

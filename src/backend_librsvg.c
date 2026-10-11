@@ -15,11 +15,13 @@
 struct private {
   void *data;
   size_t len;
-  char path[PATH_MAX+8];
+  char *path;
 };
 
 static void free_private(void *raw_private)
 {
+  struct private *private = raw_private;
+  free(private->path);
   free(raw_private);
 }
 
@@ -42,6 +44,7 @@ static void load_image(void *raw_private, struct imv_image **image, int *frameti
   if (handle) {
     *image = imv_image_create_from_svg(handle);
   }
+  g_clear_error(&error);
 }
 
 static const struct imv_source_vtable vtable = {
@@ -57,10 +60,10 @@ static enum backend_result open_path(const char *path, struct imv_source **src)
   if (!f) {
     return BACKEND_BAD_PATH;
   }
-  fread(header, 1, sizeof header, f);
+  size_t len = fread(header, 1, sizeof header - 1, f);
   fclose(f);
 
-  header[(sizeof header) - 1] = 0;
+  header[len] = 0;
   if (!strstr(header, "<SVG") && !strstr(header, "<svg")) {
     return BACKEND_UNSUPPORTED;
   }
@@ -68,7 +71,7 @@ static enum backend_result open_path(const char *path, struct imv_source **src)
   struct private *private = malloc(sizeof *private);
   private->data = NULL;
   private->len = 0;
-  snprintf(private->path, sizeof private->path, "file://%s", path);
+  private->path = strdup(path);
 
   *src = imv_source_create(&vtable, private);
   return BACKEND_SUCCESS;
@@ -78,12 +81,12 @@ static enum backend_result open_memory(void *data, size_t len, struct imv_source
 {
   /* Look for an <SVG> tag near the start of the file */
   char header[4096];
-  size_t header_len = sizeof header;
+  size_t header_len = sizeof header - 1;
   if (header_len > len) {
     header_len = len;
   }
   memcpy(header, data, header_len);
-  header[header_len - 1] = 0;
+  header[header_len] = 0;
   if (!strstr(header, "<SVG") && !strstr(header, "<svg")) {
     return BACKEND_UNSUPPORTED;
   }
@@ -91,6 +94,7 @@ static enum backend_result open_memory(void *data, size_t len, struct imv_source
   struct private *private = malloc(sizeof *private);
   private->data = data;
   private->len = len;
+  private->path = NULL;
 
   *src = imv_source_create(&vtable, private);
   return BACKEND_SUCCESS;
@@ -104,4 +108,3 @@ const struct imv_backend imv_backend_librsvg = {
   .open_path = &open_path,
   .open_memory = &open_memory,
 };
-

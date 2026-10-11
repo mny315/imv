@@ -6,21 +6,24 @@
 
 size_t imv_bitmap_size(struct imv_bitmap bmp)
 {
-  assert((size_t)bmp.width <= SIZE_MAX / bmp.height / BYTES_PER_CHANNEL);
+  if (bmp.width <= 0 || bmp.height <= 0 ||
+      (size_t)bmp.width > SIZE_MAX / bmp.height / BYTES_PER_CHANNEL) {
+    return 0;
+  }
   return (size_t)bmp.width * bmp.height * BYTES_PER_CHANNEL;
 }
 
 struct imv_bitmap imv_bitmap_alloc(int32_t width, int32_t height)
 {
-  assert(width > 0 && height > 0);
   struct imv_bitmap result = {
       .width = width,
       .height = height,
       .data = NULL,
   };
 
-  if ((size_t)width <= SIZE_MAX / height / BYTES_PER_CHANNEL) {
-    result.data = malloc(imv_bitmap_size(result));
+  size_t size = imv_bitmap_size(result);
+  if (size) {
+    result.data = malloc(size);
   }
 
   return result;

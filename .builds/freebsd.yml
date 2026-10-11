@@ -1,5 +1,6 @@
 image: freebsd/latest
 packages:
+  - devel/glib
   - devel/icu
   - devel/meson
   - devel/pkgconf
@@ -23,7 +24,7 @@ packages:
   - x11/libxkbcommon
   - xxd
 sources:
-  - https://git.sr.ht/~exec64/imv
+  - https://github.com/mny315/imv
 tasks:
   # FreeBSD's libheif is outdated and contains functions without prototypes in
   # its headers and type redefintions

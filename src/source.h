@@ -12,6 +12,12 @@ struct imv_source;
 struct imv_source_message;
 struct imv_image;
 
+/* Stable identity for queued replies, even after the source is freed. */
+int imv_source_get_id(const struct imv_source *src);
+
+/* Whether an asynchronous load or its callback is still running. */
+bool imv_source_is_busy(struct imv_source *src);
+
 /* Clean up a source. Blocks if the source is active in the background. Async
  * version does not block, performing cleanup in another thread */
 void imv_source_async_free(struct imv_source *src);

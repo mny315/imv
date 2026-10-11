@@ -1,4 +1,5 @@
 #include "window.h"
+#include "event_queue.h"
 
 #include "keyboard.h"
 #include "list.h"
@@ -8,7 +9,8 @@
 #include <fcntl.h>
 #include <limits.h>
 #include <poll.h>
-#include <signal.h>
+#include <glib.h>
+#include <math.h>
 #include <string.h>
 #include <sys/mman.h>
 #include <time.h>
@@ -48,12 +50,12 @@ struct imv_window {
   struct list *wl_outputs;
 
   int display_fd;
-  int pipe_fds[2];
+  struct imv_event_queue *events;
 
-  timer_t timer_id;
+  gint64 next_repeat;
   int repeat_scancode; /* scancode of key to repeat */
   int repeat_delay; /* time before repeat in ms */
-  int repeat_interval; /* time between repeats in ms */
+  gint64 repeat_interval; /* time between repeats in microseconds */
 
   int width;
   int height;
@@ -73,7 +75,6 @@ struct imv_window {
     struct {
       wl_fixed_t dx, dy;
       wl_fixed_t scroll_dx, scroll_dy;
-      bool dmouse1;
     } change;
   } pointer;
 
@@ -92,15 +93,6 @@ struct output_data {
   int pending_scale;
   bool contains_window;
 };
-
-static void set_nonblocking(int fd)
-{
-  int flags = fcntl(fd, F_GETFL);
-  assert(flags != -1);
-  flags |= O_NONBLOCK;
-  int rc = fcntl(fd, F_SETFL, flags);
-  assert(rc != -1);
-}
 
 static bool set_cursor(struct imv_window *window, const char *name) {
   struct wl_cursor *cursor = wl_cursor_theme_get_cursor(window->pointer.theme,
@@ -189,7 +181,8 @@ static void keyboard_enter(void *data, struct wl_keyboard *keyboard,
 static void keyboard_leave(void *data, struct wl_keyboard *keyboard,
     uint32_t serial, struct wl_surface *surface)
 {
-  (void)data;
+  struct imv_window *window = data;
+  window->next_repeat = 0;
   (void)keyboard;
   (void)serial;
   (void)surface;
@@ -231,6 +224,16 @@ static void push_keypress(struct imv_window *window, int scancode)
   imv_window_push_event(window, &e);
 }
 
+static void push_repeat(struct imv_window *window)
+{
+  /* Repeat on the event thread so keymaps and window lifetime cannot race. */
+  gint64 now = g_get_monotonic_time();
+  if (window->next_repeat && now >= window->next_repeat) {
+    push_keypress(window, window->repeat_scancode);
+    window->next_repeat = now + window->repeat_interval;
+  }
+}
+
 static void keyboard_key(void *data, struct wl_keyboard *keyboard,
     uint32_t serial, uint32_t time, uint32_t key, uint32_t state)
 {
@@ -242,40 +245,16 @@ static void keyboard_key(void *data, struct wl_keyboard *keyboard,
   imv_keyboard_update_key(window->keyboard, key, state);
 
   if (!state) {
-    /* If a key repeat timer is running, stop it */
-    struct itimerspec off = {
-      .it_value = {
-        .tv_sec = 0,
-        .tv_nsec = 0,
-      },
-      .it_interval = {
-        .tv_sec = 0,
-        .tv_nsec = 0,
-      },
-    };
-    timer_settime(window->timer_id, 0, &off, NULL);
+    if ((int)key == window->repeat_scancode) window->next_repeat = 0;
     return;
   }
 
   push_keypress(window, key);
-
-  wl_display_roundtrip(window->wl_display);
-
-  if (imv_keyboard_should_key_repeat(window->keyboard, key)) {
-    /* Kick off the key-repeat timer for the current key */
+  if (window->repeat_interval && imv_keyboard_should_key_repeat(window->keyboard, key)) {
     window->repeat_scancode = key;
-    struct itimerspec period = {
-      .it_value = {
-        .tv_sec = 0,
-        .tv_nsec = window->repeat_delay * 1000 * 1000,
-      },
-      .it_interval = {
-        .tv_sec = 0,
-        .tv_nsec = window->repeat_interval * 1000 * 1000,
-      },
-    };
-    timer_settime(window->timer_id, 0, &period, NULL);
+    window->next_repeat = g_get_monotonic_time() + (gint64)window->repeat_delay * 1000;
   }
+
 }
 
 static void keyboard_modifiers(void *data, struct wl_keyboard *keyboard,
@@ -298,8 +277,9 @@ static void keyboard_repeat(void *data, struct wl_keyboard *keyboard,
 {
   (void)keyboard;
   struct imv_window *window = data;
-  window->repeat_delay = delay;
-  window->repeat_interval = rate == 0 ? 0 : 1000 / rate;
+  window->repeat_delay = MAX(delay, 0);
+  window->repeat_interval = rate <= 0 ? 0 : MAX(1, 1000000 / rate);
+  if (!window->repeat_interval) window->next_repeat = 0;
 }
 
 static const struct wl_keyboard_listener keyboard_listener = {
@@ -368,9 +348,19 @@ static void pointer_button(void *data, struct wl_pointer *pointer,
 
   struct imv_window *window = data;
   const uint32_t MOUSE1 = 0x110;
-  if (button == MOUSE1) {
-    window->pointer.change.dmouse1 |= state != window->pointer.current.mouse1;
+  if (button == MOUSE1 && state != window->pointer.current.mouse1) {
     window->pointer.current.mouse1 = state;
+    /* Preserve each press/release and its position, even within one frame. */
+    struct imv_event e = {
+      .type = IMV_EVENT_MOUSE_BUTTON,
+      .data.mouse_button = {
+        .button = 1,
+        .pressed = state,
+        .x = wl_fixed_to_double(window->scale * window->pointer.current.x),
+        .y = wl_fixed_to_double(window->scale * window->pointer.current.y),
+      }
+    };
+    imv_window_push_event(window, &e);
   }
 }
 
@@ -407,19 +397,6 @@ static void pointer_frame(void *data, struct wl_pointer *pointer)
           .y = wl_fixed_to_double(window->scale * window->pointer.current.y),
           .dx = dx,
           .dy = dy,
-        }
-      }
-    };
-    imv_window_push_event(window, &e);
-  }
-
-  if (window->pointer.change.dmouse1) {
-    struct imv_event e = {
-      .type = IMV_EVENT_MOUSE_BUTTON,
-      .data = {
-        .mouse_button = {
-          .button = 1,
-          .pressed = window->pointer.current.mouse1
         }
       }
     };
@@ -842,9 +819,7 @@ static bool connect_to_wayland(struct imv_window *window)
     return false;
   }
   window->display_fd = wl_display_get_fd(window->wl_display);
-  pipe(window->pipe_fds);
-  set_nonblocking(window->pipe_fds[0]);
-  set_nonblocking(window->pipe_fds[1]);
+
 
   window->wl_registry = wl_display_get_registry(window->wl_display);
   assert(window->wl_registry);
@@ -918,8 +893,7 @@ static void create_window(struct imv_window *window, int width, int height,
 
 static void shutdown_wayland(struct imv_window *window)
 {
-  close(window->pipe_fds[0]);
-  close(window->pipe_fds[1]);
+  imv_event_queue_free(window->events);
   if (window->wl_pointer) {
     wl_pointer_destroy(window->wl_pointer);
   }
@@ -978,12 +952,6 @@ static void shutdown_wayland(struct imv_window *window)
   }
 }
 
-static void on_timer(union sigval sigval)
-{
-  struct imv_window *window = sigval.sival_ptr;
-  push_keypress(window, window->repeat_scancode);
-}
-
 extern PFNGLGENERATEMIPMAPPROC imv_glGenerateMipmap;
 
 static void load_gl_functions(void) {
@@ -995,34 +963,32 @@ static void load_gl_functions(void) {
 struct imv_window *imv_window_create(int width, int height, const char *title,
                                      const char *app_id)
 {
-  /* Ensure event writes will always be atomic */
-  assert(sizeof(struct imv_event) <= PIPE_BUF);
-
   struct imv_window *window = calloc(1, sizeof *window);
+  window->events = imv_event_queue_create();
+  if (!window->events) {
+    free(window);
+    return NULL;
+  }
   window->scale = 1;
 
   window->keyboard = imv_keyboard_create();
   assert(window->keyboard);
   window->wl_outputs = list_create();
   if (!connect_to_wayland(window)) {
+    imv_event_queue_free(window->events);
+    imv_keyboard_free(window->keyboard);
+    list_free(window->wl_outputs);
+    free(window);
     return NULL;
   }
   create_window(window, width, height, title, app_id);
   load_gl_functions();
 
-  struct sigevent timer_handler = {
-    .sigev_notify = SIGEV_THREAD,
-    .sigev_value.sival_ptr = window,
-    .sigev_notify_function = on_timer,
-  };
-  int timer_rc = timer_create(CLOCK_MONOTONIC, &timer_handler, &window->timer_id);
-  assert(timer_rc == 0);
   return window;
 }
 
 void imv_window_free(struct imv_window *window)
 {
-  timer_delete(window->timer_id);
   imv_keyboard_free(window->keyboard);
   shutdown_wayland(window);
   list_deep_free(window->wl_outputs);
@@ -1109,7 +1075,7 @@ void imv_window_wait_for_event(struct imv_window *window, double timeout)
 {
   struct pollfd fds[] = {
     {.fd = window->display_fd,  .events = POLLIN},
-    {.fd = window->pipe_fds[0], .events = POLLIN}
+    {.fd = imv_event_queue_fd(window->events), .events = POLLIN}
   };
   nfds_t nfds = sizeof fds / sizeof *fds;
 
@@ -1120,7 +1086,12 @@ void imv_window_wait_for_event(struct imv_window *window, double timeout)
 
   wl_display_flush(window->wl_display);
 
-  if (poll(fds, nfds, timeout * 1000) <= 0) {
+  if (window->next_repeat) {
+    double remaining = MAX(0, window->next_repeat - g_get_monotonic_time()) / 1000000.0;
+    if (timeout < 0 || remaining < timeout) timeout = remaining;
+  }
+  int wait_ms = timeout < 0 ? -1 : MIN(INT_MAX, ceil(timeout * 1000));
+  if (poll(fds, nfds, wait_ms) <= 0) {
     wl_display_cancel_read(window->wl_display);
     return;
   }
@@ -1137,8 +1108,7 @@ void imv_window_wait_for_event(struct imv_window *window, double timeout)
 
 void imv_window_push_event(struct imv_window *window, struct imv_event *e)
 {
-  /* Push it down the pipe */
-  write(window->pipe_fds[1], e, sizeof *e);
+  imv_event_queue_push(window->events, e);
 }
 
 void imv_window_pump_events(struct imv_window *window, imv_event_handler handler, void *data)
@@ -1148,13 +1118,13 @@ void imv_window_pump_events(struct imv_window *window, imv_event_handler handler
     abort();
   }
 
+  push_repeat(window);
+
   while (1) {
     struct imv_event e;
-    ssize_t len = read(window->pipe_fds[0], &e, sizeof e);
-    if (len <= 0) {
+    if (!imv_event_queue_pop(window->events, &e)) {
       break;
     }
-    assert(len == sizeof e);
     if (handler) {
       handler(data, &e);
     }

@@ -18,6 +18,12 @@ managers. It supports a wide variety of image file formats, including animated
 gif files. imv will automatically reload the current image, if it is changed on
 disk.
 
+Opening a single image also loads the other files in its directory and starts
+with the requested image, so *next* and *prev* can browse neighbouring images.
+The *-n* option overrides the initial selection. Multiple paths and paths read
+from stdin are used as an explicit list. Use *imv -* to read image data from
+stdin.
+
 Synopsis
 --------
 'imv' [options] [paths...]
@@ -134,8 +140,42 @@ Commands can be entered by pressing *:*. imv supports the following commands:
 	Close the currently selected image, or the image at the given index, or
 	all images.
 
+*trash*::
+	Move the current file to the system trash, then select the next image.
+	The previous image becomes the one preceding the trashed file. At the
+	end of the list, select the first remaining image. The window stays open
+	if no files remain, so the move can still be undone.
+	If trashing fails, the file and selection are left unchanged. Images from
+	stdin and images that have not finished loading cannot be trashed.
+
+*undo_trash*::
+	Restore the last file trashed in this window to its original location and
+	position in the image list, then select it. Repeat to undo earlier moves.
+	Existing files are never overwritten. If restoration fails, the selection
+	and undo history are left unchanged. Undo history lasts until the window
+	is closed; files left in the trash can still be restored with a file manager.
+
 *fullscreen*::
 	Toggle fullscreen.
+
+*crop*::
+	Enter mouse crop mode (or cancel it if already active). Drag with the left
+	mouse button to select an area, then press Enter to save or Escape to cancel.
+	Animation and slideshow playback pause during selection. Other navigation
+	and transformation keys are disabled until crop mode ends.
+	The selection uses native image resolution and the displayed rotation and
+	mirroring. The current frame is used for animated images; SVG is rasterized.
+	Resizing the window or changing the view through IPC cancels the selection.
+
+*crop_save*::
+	Save the current crop beside the original as 'NAME-crop.png'. If that name
+	is occupied, use 'NAME-crop-2.png', 'NAME-crop-3.png', and so on. Existing
+	files are never overwritten. Images from stdin are saved as 'image-crop.png'
+	in the working directory. The original stays selected and the saved file is
+	added to the image list. If saving fails, keep the selection for another attempt.
+
+*crop_cancel*::
+	Leave crop mode without saving and restore the previous playback state.
 
 *overlay*::
 	Toggle the overlay.
@@ -213,6 +253,15 @@ imv comes with several binds configured by default
 
 *x*::
 	Close current image
+
+*Delete*::
+	Move current file to the trash and show the next image
+
+*Ctrl+z*::
+	Restore and select the last file moved to the trash
+
+*Ctrl+c*::
+	Select a crop with the mouse; Enter saves to a separate PNG, Escape cancels
 
 *f*::
 	Toggle fullscreen
@@ -340,13 +389,14 @@ The **imv-msg**(1) utility is provided to simplify this from shell scripts.
 Authors
 -------
 
-imv is written and maintained by Harry Jeffery <me@harry.pm>
+imv was originally written by Harry Jeffery <me@harry.pm>
 with contributions from other developers.
 
 Full source code and other information can be found at
-<https://sr.ht/~exec64/imv>.
+<https://github.com/mny315/imv>.
+The original project is <https://sr.ht/~exec64/imv>.
 
 See Also
 --------
 
-**imv**(5) **imv-msg**(1) **imv-dir**(1)
+**imv**(5) **imv-msg**(1)

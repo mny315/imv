@@ -2,6 +2,7 @@
 #define IMV_NAVIGATOR_H
 
 #include <unistd.h>
+#include <stdbool.h>
 
 /* Creates an instance of imv_navigator */
 struct imv_navigator *imv_navigator_create(void);
@@ -41,12 +42,26 @@ void imv_navigator_remove_at(struct imv_navigator *nav, size_t index);
 /* Removes all paths */
 void imv_navigator_remove_all(struct imv_navigator *nav);
 
+/* Move the selected file to the system trash and remove all occurrences from
+ * the list, selecting the next remaining file regardless of the last direction.
+ * Refuses to trash a pending selection, stdin, or an empty list.
+ * Returns false on failure without changing the list or selection. */
+bool imv_navigator_trash(struct imv_navigator *nav);
+
+/* Restore the most recent trashed file in this session and select it.
+ * A failed restore leaves the undo record and current selection intact. */
+bool imv_navigator_undo_trash(struct imv_navigator *nav);
+bool imv_navigator_can_undo_trash(struct imv_navigator *nav);
+
 /* Return the index of the path given. Returns -1 if not found. */
 ssize_t imv_navigator_find_path(struct imv_navigator *nav, const char *path);
 
 /* Returns 1 if either the currently selected path or underlying file has
  * changed since last called */
 int imv_navigator_poll_changed(struct imv_navigator *nav);
+
+/* Whether a new selection is waiting to be loaded, without consuming it. */
+bool imv_navigator_has_pending_change(const struct imv_navigator *nav);
 
 /* Check whether navigator wrapped around paths list */
 int imv_navigator_wrapped(struct imv_navigator *nav);
